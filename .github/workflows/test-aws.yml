@@ -1,0 +1,25 @@
+name: Test AWS CLI
+
+on: workflow_dispatch   # lets you run it manually from the Actions tab
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/GitHubOIDCDeployRole
+          aws-region: us-east-1
+
+      - name: Test SSM fetch
+        run: |
+          aws ssm get-parameter \
+            --name "/prod/db/primary/password" \
+            --with-decryption \
+            --query 'Parameter.Value' \
+            --output text || echo "Secret not found yet"
