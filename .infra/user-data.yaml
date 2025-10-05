@@ -1,0 +1,209 @@
+#cloud-config
+package_update: true
+packages:
+  - postgresql
+  - postgresql-contrib
+  - awscli
+  - rsync
+  - jq
+
+write_files:
+  - path: /root/pg-bootstrap.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # ===== Logging to a dedicated file =====
+      LOG_FILE="/var/log/pg-bootstrap.log"
+      mkdir -p "$(dirname "$LOG_FILE")"
+      # Append all stdout/stderr to the log file and console
+      exec > >(tee -a "$LOG_FILE") 2>&1
+
+      echo "[+] Bootstrap starting at $(date -Is)"
+
+      # --------- CONFIG (no secrets here) ----------
+      DB_NAME="myappdb"
+      DB_USER="myappuser"
+      DB_SCHEMA="public"               # e.g., "myapp"; keep "public" to use default
+      ALLOW_CIDR="10.0.0.0/16"         # tighten as needed
+      S3_BUCKET=""                     # e.g., "my-company-db-backups"
+      SSM_DB_PASS_PARAM="/dev/db/primary/password"   # SecureString in SSM
+      # --------------------------------------------
+
+      echo "[+] Detecting installed PostgreSQL version..."
+      PGVER="$(ls /etc/postgresql | sort -nr | head -1)"
+      if [[ -z "${PGVER}" ]]; then
+        echo "[-] PostgreSQL not installed yet or no version under /etc/postgresql"; exit 1
+      fi
+      echo "    Found PG ${PGVER}"
+
+      # ----- Fetch DB password securely from SSM -----
+      echo "[+] Determining AWS region via IMDS..."
+      AWS_DEFAULT_REGION="$(curl -fsS http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region)"
+      export AWS_DEFAULT_REGION
+      if [[ -z "${AWS_DEFAULT_REGION}" || "${AWS_DEFAULT_REGION}" == "null" ]]; then
+        echo "[-] Could not determine region from IMDS."; exit 1
+      fi
+      echo "    Region: ${AWS_DEFAULT_REGION}"
+
+      echo "[+] Fetching DB password from SSM (SecureString)..."
+      # DO NOT echo the password; keep in-memory only
+      DB_PASS="$(aws ssm get-parameter \
+        --name "$SSM_DB_PASS_PARAM" \
+        --with-decryption \
+        --query 'Parameter.Value' \
+        --output text)"
+      if [[ -z "${DB_PASS}" || "${DB_PASS}" == "None" ]]; then
+        echo "[-] Empty DB_PASS from SSM; aborting."; exit 1
+      fi
+      echo "    Retrieved password from SSM."
+
+      # ----- Prepare dedicated 80GB data volume for PGDATA -----
+      echo "[+] Detecting and preparing 80GB data volume (EBS) ..."
+      DATA_DEV=""
+      for CANDIDATE in /dev/nvme1n1 /dev/xvdf /dev/sdf; do
+        if [[ -b "$CANDIDATE" ]]; then
+          DATA_DEV="$CANDIDATE"
+          break
+        fi
+      done
+      if [[ -z "${DATA_DEV}" ]]; then
+        echo "[-] Data device not found (expected /dev/nvme1n1, /dev/xvdf, or /dev/sdf). Is the 80GB volume attached?"; exit 1
+      fi
+      echo "    Found data device: ${DATA_DEV}"
+
+      echo "[+] Creating filesystem (ext4) on ${DATA_DEV} ..."
+      mkfs.ext4 -F -E lazy_itable_init=0,lazy_journal_init=0 -m 1 "${DATA_DEV}"
+
+      echo "[+] Mounting data volume to /var/lib/postgresql ..."
+      systemctl stop postgresql || true
+      # Backup the initial cluster created by the package (so we can move onto data disk)
+      if [[ -d /var/lib/postgresql && ! -d /var/lib/postgresql._old ]]; then
+        mv /var/lib/postgresql /var/lib/postgresql._old
+      fi
+      mkdir -p /var/lib/postgresql
+      chown postgres:postgres /var/lib/postgresql
+      chmod 700 /var/lib/postgresql
+
+      UUID="$(blkid -s UUID -o value "${DATA_DEV}")"
+      grep -q "${UUID}" /etc/fstab || echo "UUID=${UUID} /var/lib/postgresql ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
+      mount -a
+
+      # Restore initial data (cluster) onto the new volume if present
+      if [[ -d /var/lib/postgresql._old && -z "$(ls -A /var/lib/postgresql)" ]]; then
+        echo "[+] Migrating initial data directory to the new volume ..."
+        rsync -aHAX /var/lib/postgresql._old/ /var/lib/postgresql/
+        chown -R postgres:postgres /var/lib/postgresql
+      fi
+
+      PGCONF="/etc/postgresql/${PGVER}/main/postgresql.conf"
+      PGHBA="/etc/postgresql/${PGVER}/main/pg_hba.conf"
+
+      echo "[+] Enabling listen on all interfaces ..."
+      sed -ri "s/^#?listen_addresses\s*=.*/listen_addresses = '*'/" "${PGCONF}"
+
+      echo "[+] Enforcing SCRAM password hashing ..."
+      grep -q "^password_encryption" "${PGCONF}" || echo "password_encryption = 'scram-sha-256'" >> "${PGCONF}"
+
+      echo "[+] (Optional) Light tuning for small instance ..."
+      grep -q "^shared_buffers" "${PGCONF}" || echo "shared_buffers = 1GB" >> "${PGCONF}"
+      grep -q "^effective_cache_size" "${PGCONF}" || echo "effective_cache_size = 2GB" >> "${PGCONF}"
+      grep -q "^work_mem" "${PGCONF}" || echo "work_mem = 8MB" >> "${PGCONF}"
+      grep -q "^max_connections" "${PGCONF}" || echo "max_connections = 100" >> "${PGCONF}"
+
+      echo "[+] Postgres logging configuration ..."
+      # Ensure logging collector and a predictable filename/location
+      grep -q "^logging_collector" "${PGCONF}" || echo "logging_collector = on" >> "${PGCONF}"
+      grep -q "^log_directory" "${PGCONF}" || echo "log_directory = 'log'" >> "${PGCONF}"         # default /var/log/postgresql
+      grep -q "^log_filename" "${PGCONF}" || echo "log_filename = 'postgresql-%Y-%m-%d.log'" >> "${PGCONF}"
+      grep -q "^log_min_duration_statement" "${PGCONF}" || echo "log_min_duration_statement = 1000" >> "${PGCONF}"
+
+      echo "[+] Allowing network access for ${DB_USER} to ${DB_NAME} from ${ALLOW_CIDR} ..."
+      if ! grep -q "host\s\+${DB_NAME}\s\+${DB_USER}" "${PGHBA}"; then
+        # Prefer SCRAM over md5
+        echo "host    ${DB_NAME}    ${DB_USER}    ${ALLOW_CIDR}    scram-sha-256" >> "${PGHBA}"
+      fi
+
+      echo "[+] Restarting PostgreSQL to apply settings ..."
+      systemctl restart postgresql
+
+      echo "[+] Creating database/user/schema ..."
+      # NOTE: DB_PASS is used but never logged
+      sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
+      DO \$\$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}') THEN
+          CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';
+        END IF;
+      END
+      \$\$;
+
+      DO \$\$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}') THEN
+          CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};
+        END IF;
+      END
+      \$\$;
+
+      \\connect ${DB_NAME}
+      DO \$\$
+      BEGIN
+        IF '${DB_SCHEMA}' <> 'public' THEN
+          EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I AUTHORIZATION %I', '${DB_SCHEMA}', '${DB_USER}');
+          EXECUTE format('ALTER DATABASE %I SET search_path = %I, public', '${DB_NAME}', '${DB_SCHEMA}');
+        END IF;
+      END
+      \$\$;
+      SQL
+
+      echo "[+] Setting up daily pg_dump backups ..."
+      install -d -o postgres -g postgres /var/backups/postgres
+
+      cat >/usr/local/bin/pg_dump_daily.sh <<'EOS'
+      #!/usr/bin/env bash
+      set -euo pipefail
+      DB_NAME="{{DB_NAME}}"
+      OUT="/var/backups/postgres/${DB_NAME}_$(date +%F_%H%M).dump"
+      pg_dump -Fc "${DB_NAME}" > "${OUT}"
+      find /var/backups/postgres -type f -name "${DB_NAME}_*.dump" -mtime +14 -delete
+      if [[ -n "{{S3_BUCKET}}" ]]; then
+        aws s3 cp "${OUT}" "s3://{{S3_BUCKET}}/$(hostname)/"
+      fi
+      EOS
+      sed -i "s/{{DB_NAME}}/${DB_NAME}/g" /usr/local/bin/pg_dump_daily.sh
+      sed -i "s/{{S3_BUCKET}}/${S3_BUCKET}/g" /usr/local/bin/pg_dump_daily.sh
+      chown root:root /usr/local/bin/pg_dump_daily.sh
+      chmod 0755 /usr/local/bin/pg_dump_daily.sh
+
+      cat >/etc/systemd/system/pg-dump.service <<'EOS'
+      [Unit]
+      Description=Daily pg_dump of application database
+
+      [Service]
+      Type=oneshot
+      User=postgres
+      Group=postgres
+      ExecStart=/usr/local/bin/pg_dump_daily.sh
+      EOS
+
+      cat >/etc/systemd/system/pg-dump.timer <<'EOS'
+      [Unit]
+      Description=Run pg_dump daily at 01:30
+
+      [Timer]
+      OnCalendar=*-*-* 01:30:00
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+      EOS
+
+      systemctl daemon-reload
+      systemctl enable --now pg-dump.timer
+
+      echo "[✓] Bootstrap complete at $(date -Is). Log: ${LOG_FILE}"
+runcmd:
+  - [ bash, -lc, "/root/pg-bootstrap.sh" ]
