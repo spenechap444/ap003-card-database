@@ -1,0 +1,71 @@
+name: Deploy DB host (CLI)
+
+on: workflow_dispatch
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::8481-6760-4595:role/GitHubOIDCDeployRole
+          aws-region: us-east-1
+
+      - name: Upsert DB password in SSM (optional)
+        if: secrets.DB_PASS != ''
+        run: |
+          aws ssm put-parameter \
+            --name "/dev/db/primary/password" \
+            --type SecureString \
+            --value "${{ secrets.DB_PASS }}" \
+            --overwrite
+
+      - name: Create IAM role + instance profile (idempotent-ish)
+        run: |
+          set -e
+          ROLE_NAME="ec2-ssm-reader"
+          PROFILE_NAME="ec2-ssm-reader-profile"
+          POLICY_DOC='{
+            "Version":"2012-10-17",
+            "Statement":[{"Effect":"Allow",
+              "Action":["ssm:GetParameter"],
+              "Resource":"arn:aws:ssm:us-east-1:8481-6760-4595:parameter/dev/db/primary/password"}]
+          }'
+          TRUST_DOC='{
+            "Version":"2012-10-17",
+            "Statement":[{"Effect":"Allow",
+              "Principal":{"Service":"ec2.amazonaws.com"},
+              "Action":"sts:AssumeRole"}]
+          }'
+
+          aws iam create-role --role-name "$ROLE_NAME" --assume-role-policy-document "$TRUST_DOC" 2>/dev/null || true
+          aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name ReadDbSecret --policy-document "$POLICY_DOC"
+          aws iam create-instance-profile --instance-profile-name "$PROFILE_NAME" 2>/dev/null || true
+          aws iam add-role-to-instance-profile --instance-profile-name "$PROFILE_NAME" --role-name "$ROLE_NAME" 2>/dev/null || true
+
+      - name: Launch/Update EC2 (example~ new instance)
+        run: |
+          AMI_ID="ami-004d0c9c98bf36c88"
+          SG_ID="sg-06f7ddb3987f70f24"
+          SUBNET_ID="subnet-04afa62a0e03471b4"
+          PROFILE_ARN="arn:aws:iam::8481-6760-4595:instance-profile/ec2-ssm-reader-profile"
+
+          # Load your cloud-init from repo
+          USERDATA_B64=$(base64 -w0 ./.infra/user-data.yaml)
+
+          aws ec2 run-instances \
+            --image-id "$AMI_ID" \
+            --instance-type t3.small \
+            --iam-instance-profile Name="ec2-ssm-reader-profile" \
+            --security-group-ids "$SG_ID" \
+            --subnet-id "$SUBNET_ID" \
+            --user-data "$USERDATA_B64" \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=postgres-db}]' \
+            --count 1
