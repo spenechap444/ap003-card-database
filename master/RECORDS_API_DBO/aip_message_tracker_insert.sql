@@ -1,0 +1,67 @@
+CREATE OR REPLACE PROCEDURE RECORDS_API_DBO.AIP_MESSAGE_TRACKER_INSERT (P_ID_I					IN VARCHAR(300),
+														P_TELNYX_MESSAGE_ID_I 	IN VARCHAR(300),
+														P_MESSAGING_PROFILE_ID 	IN VARCHAR(300),
+														P_FROM_NUMBER_I			IN VARCHAR(20),
+														P_TO_NUMBER_I			IN VARCHAR(20),
+														P_DIRECTION_I			IN VARCHAR(10),
+														P_BODY_I				IN TEXT,
+														P_MEDIA_URLS_I			IN TEXT[],
+														P_STATUS_I				IN VARCHAR(50),
+														P_ERROR_CODE_I			IN VARCHAR(50),
+														P_ERROR_MESSAGE_I		IN TEXT,
+														P_WEBHOOK_RECEIVED_TS_I	IN TIMESTAMP,
+														P_CARRIER_I				VARCHAR(100),
+														P_SENT_TS_I				TIMESTAMP,
+														P_DELIVERED_TS_I		TIMESTAMP,
+														P_CREATE_TS_I			TIMESTAMP,
+														P_UPDATE_TS_I			TIMESTAMP)
+AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM MESSAGE_TRACKER WHERE TELNYX_MESSAGE_ID = P_TELNYX_MESSAGE_ID_I) THEN
+	    INSERT INTO MESSAGE_TRACKER(ID,
+								TELNYX_MESSAGE_ID,
+								MESSAGING_PROFILE_ID,
+								FROM_NUMBER,
+								TO_NUMBER,
+								DIRECTION,
+								BODY,
+								MEDIA_URLS,
+								STATUS,
+								ERROR_CODE,
+								ERROR_MESSAGE,
+								WEBHOOK_RECEIVED_TS,
+								CARRIER,
+								SENT_TS,
+								DELIVERED_TS)
+						VALUES (P_ID_I,
+								P_TELNYX_MESSAGE_ID_I,
+								P_MESSAGING_PROFILE_ID_I,
+								P_FROM_NUMBER_I,
+								P_TO_NUMBER_I,
+								P_DIRECTION_I,
+								P_BODY_I,
+								P_MEDIA_URLS_I,
+								P_STATUS_I,
+								P_ERROR_CODE_I,
+								P_ERROR_MESSAGE_I,
+								P_WEBHOOK_RECEIVED_TS_I,
+								P_CARRIER_I,
+								P_SENT_TS_I,
+								P_DELIVERED_TS_I,
+								CURRENT_TIMESTAMP,
+								NULL);
+    ELSE
+        UPDATE ACCOUNT_DBO.MESSAGE_TRACKER
+        SET STATUS = P_STATUS_I,
+            ERROR_CODE = P_ERROR_CODE_I,
+            ERROR_MESSAGE = P_ERROR_MESSAGE_I,
+            UPDATE_TS = CURRENT_TIMESTAMP
+        WHERE TELNYX_MESSAGE_ID = P_TELNYX_MESSAGE_ID_I;
+    END IF;
+
+    
+	EXCEPTION
+		WHEN OTHERS THEN
+			RAISE EXCEPTION 'Error in procedure aip_message_tracker_insert (%)', SQLERRM;
+END;
+$$ LANGUAGE plpgsql;
