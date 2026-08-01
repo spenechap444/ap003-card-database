@@ -1,5 +1,6 @@
 CREATE OR REPLACE FUNCTION account_api_dbo.aip_fetch_user(
-	p_email_i character varying)
+	p_email_i character varying,
+    P_ADMIN_FLAG_I VARCHAR(1))
     RETURNS TABLE(p_first_name_o character varying, 
                   p_last_name_o character varying, 
                   p_user_name_o character varying, 
@@ -22,7 +23,8 @@ BEGIN
                         notifications,
                         join_date
                 FROM ACCOUNT_DBO.USERS
-                WHERE email = p_email_i;
+                WHERE email = p_email_i
+                  AND admin_flag = COALESCE(P_ADMIN_FLAG_I, admin_flag);
 
     EXCEPTION
         WHEN OTHERS THEN

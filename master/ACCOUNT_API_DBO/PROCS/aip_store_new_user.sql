@@ -6,7 +6,9 @@ CREATE OR REPLACE PROCEDURE account_api_dbo.aip_store_new_user(
 	IN p_user_password_i character varying,
 	IN p_bio_i character varying,
 	IN p_account_id_i character varying,
-	IN p_notifications_i boolean)
+	IN p_notifications_i boolean,
+  IN P_PHONE_NBR_I  VARCHAR(20),
+  IN p_admin_flag_i VARCHAR(1))
 
 AS $$
 DECLARE
@@ -24,7 +26,8 @@ BEGIN
                                UPDATE_ID,
                                UPDATE_TS,
                                JOIN_DATE,
-							   PHONE_NBR)
+							                  PHONE_NBR,
+                                ADMIN_FLAG)
                     VALUES (P_FIRST_NAME_I,
                             P_LAST_NAME_I,
                             P_USER_NAME_I,
@@ -38,7 +41,8 @@ BEGIN
                             NULL,
                             NULL,
                             CURRENT_TIMESTAMP,
-						   NULL);
+						                P_PHONE_NBR_I,
+                            P_ADMIN_FLAG_I);
 
     EXCEPTION 
       WHEN OTHERS THEN

@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS account_dbo.users
+CREATE TABLE IF NOT EXISTS ACCOUNT_DBO.USERS
 (
     first_name character varying(50) COLLATE pg_catalog."default",
     last_name character varying(50) COLLATE pg_catalog."default",
@@ -18,4 +18,4 @@ CREATE TABLE IF NOT EXISTS account_dbo.users
     CONSTRAINT users_email_key UNIQUE (email),
     CONSTRAINT users_user_name_key UNIQUE (user_name)
 );
-GRANT INSERT, UPDATE, DELETE, SELECT ON account_dbo.users TO APPUSER;
+GRANT INSERT, UPDATE, DELETE, SELECT ON ACCOUNT_DBO.USERS TO APPUSER;
