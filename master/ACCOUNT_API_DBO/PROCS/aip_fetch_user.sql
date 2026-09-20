@@ -9,7 +9,9 @@ CREATE OR REPLACE FUNCTION account_api_dbo.aip_fetch_user(
                   p_bio_o character varying, 
                   p_account_id_o character varying, 
                   p_notifications_o boolean, 
-                  p_join_date_o timestamp without time zone) 
+                  p_join_date_o timestamp without time zone,
+                  p_phone_nbr_o character varying,
+                  p_admin_flag_o character varying) 
 AS $$
 DECLARE
 BEGIN
@@ -21,7 +23,9 @@ BEGIN
                         bio,
                         account_id,
                         notifications,
-                        join_date
+                        join_date,
+                        phone_nbr,
+                        admin_flag
                 FROM ACCOUNT_DBO.USERS
                 WHERE email = p_email_i
                   AND admin_flag = COALESCE(P_ADMIN_FLAG_I, admin_flag);

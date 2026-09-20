@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS ACCOUNT_DBO.USERS
+CREATE TABLE IF NOT EXISTS account_dbo.users
 (
     first_name character varying(50) COLLATE pg_catalog."default",
     last_name character varying(50) COLLATE pg_catalog."default",
@@ -14,8 +14,12 @@ CREATE TABLE IF NOT EXISTS ACCOUNT_DBO.USERS
     update_ts timestamp without time zone,
     join_date timestamp without time zone,
     phone_nbr character varying(15) COLLATE pg_catalog."default",
+    admin_flag character varying(1) COLLATE pg_catalog."default",
     CONSTRAINT users_pkey PRIMARY KEY (account_id),
     CONSTRAINT users_email_key UNIQUE (email),
     CONSTRAINT users_user_name_key UNIQUE (user_name)
-);
-GRANT INSERT, UPDATE, DELETE, SELECT ON ACCOUNT_DBO.USERS TO APPUSER;
+)
+
+TABLESPACE pg_default;
+
+GRANT DELETE, INSERT, SELECT, UPDATE ON TABLE account_dbo.users TO APPUSER;
